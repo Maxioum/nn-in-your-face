@@ -39,7 +39,7 @@ def renderMandelbrot(resx, resy, xmin=-2.4, xmax=1, yoffset=0, max_depth=50, gpu
         return mandelbrotGPU(resx, resy, xmin, xmax, ymin, ymax, max_depth).cpu().numpy()
 
 
-def renderModel(model, resx, resy, xmin=-2.4, xmax=1, yoffset=0, linspace=None, max_gpu=False, keep_cuda=False):
+def renderModel(model, resx, resy, xmin=-2.4, xmax=1, yoffset=0, linspace=None, max_gpu=False, cuda: bool = True):
     """ 
     Generates an image of a model's predition of the mandelbrot set in 2d linear\
     space with a given resolution. Prioritizes resolution over ease of positioning,\
@@ -58,20 +58,16 @@ def renderModel(model, resx, resy, xmin=-2.4, xmax=1, yoffset=0, linspace=None, 
         (resx*resy, 2). Default None, and a new linspace will be generated automatically.
     max_gpu (boolean): if True, the entire linspace will be squeezed into a single batch. 
         Requires decent gpu memory size and is significantly faster.
-    keep_cuda (boolean): if True, the output and linspace will not be removed from the gpu and will be returned as cuda tensors.
 
     Returns: 
-    numpy array: 2d float array representing an image
-    OR IF KEEP_CUDA IS TRUE:
-    torch.tensor: 2d float tensor representing an image
+    numpy array: 2d float array representing an image 
     """
     with torch.no_grad():
         model.eval()
-
         if linspace is None:
-            linspace = generateLinspace(resx, resy, xmin, xmax, yoffset)
-        
-        linspace = linspace.cuda()
+            linspace = generateLinspace(resx, resy, xmin, xmax, yoffset, cuda)
+        if cuda:
+            linspace = linspace.cuda()
         
         if not max_gpu:
             # slices each row of the image into batches to be fed into the nn.
@@ -88,24 +84,34 @@ def renderModel(model, resx, resy, xmin=-2.4, xmax=1, yoffset=0, linspace=None, 
 
 
         im = torch.clamp(im, 0, 1) # doesn't add weird pure white artifacts
-        model.train()
-        im = im.squeeze()
-        if not keep_cuda:
-            im = im.cpu().numpy()
+        if cuda:
             linspace = linspace.cpu()
             torch.cuda.empty_cache()
+        model.train()
+        im = im.squeeze()
+        if cuda:
+            im = im.cpu()
+        im = im.numpy()
         return im
 
 
-
-def generateLinspace(resx, resy, xmin=-2.4, xmax=1, yoffset=0):
+def generateLinspace(resx, resy, xmin=-2.4, xmax=1, yoffset=0, cuda: bool = True):
     iteration = (xmax-xmin)/resx
-    X = torch.arange(xmin, xmax, iteration).cuda()[:resx]
+    X = torch.arange(xmin, xmax, iteration)
+    if cuda:
+        X = X.cuda()
+    X = X[:resx]
+
     y_max = iteration * resy/2
     Y = torch.arange(-y_max-yoffset,  y_max-yoffset, iteration)[:resy]
     linspace = []
     for y in Y:
-        ys = torch.ones(len(X)).cuda() * y
+
+        ys = torch.ones(len(X))
+        if cuda:
+            ys = ys.cuda()
+        ys = ys * y
+
         points = torch.stack([X, ys], 1)
         linspace.append(points)
     return torch.stack(linspace, 0)
@@ -148,7 +154,7 @@ class VideoMaker:
 
         self.frame_count = 0
 
-    def generateFrame(self, model):
+    def generateFrame(self, model,cuda:bool = True):
         """
         Generates a single frame using `renderModel` with the given model and appends it to the mp4
         """
@@ -159,7 +165,7 @@ class VideoMaker:
             self._yoffset = shot["yoffset"]
             if len(shot) > 4:
                 self.capture_rate=shot["capture_rate"]
-            self.linspace = generateLinspace(self.dims[0], self.dims[1], self._xmin, self._xmax, self._yoffset)
+            self.linspace = generateLinspace(self.dims[0], self.dims[1], self._xmin, self._xmax, self._yoffset,cuda)
 
         # model.eval()
         im = renderModel(model, self.dims[0], self.dims[1], linspace=self.linspace, max_gpu=self.max_gpu)
