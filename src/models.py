@@ -2,15 +2,6 @@ import torch
 import torch.nn as nn
 import math
 
-class Binary(nn.Module):
-    def __init__(self):
-        super(Binary, self).__init__()
-    
-    def forward(self, x):
-        x[x>=0] = 1
-        x[x<0] = -1
-        return x
-
 class Simple(nn.Module):
 	""" 
 	Very simple linear torch model. Uses relu activation and\
