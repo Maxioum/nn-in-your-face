@@ -1,30 +1,7 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
-import math
-
-class Simple(nn.Module):
-	""" 
-	Very simple linear torch model. Uses relu activation and\
-	one final sigmoid activation.
-
-	Parameters: 
-	hidden_size (float): number of parameters per hidden layer
-	num_hidden_layers (float): number of hidden layers
-	"""
-	def __init__(self, hidden_size=100, num_hidden_layers=7, init_size=2, activation=nn.GELU):
-		super(Simple,self).__init__()
-		layers = [nn.Linear(init_size, hidden_size),
-							activation()]
-		for _ in range(num_hidden_layers):
-			layers.append(nn.Linear(hidden_size, hidden_size))
-			layers.append(activation())
-		layers.append(nn.Linear(hidden_size, 1))
-		# layers.append(nn.Sigmoid())
-		self.tanh = nn.Tanh()
-		self.seq = nn.Sequential(*layers)
-
-	def forward(self,x):
-		return (self.tanh(self.seq(x))+1)/2
 
 
 class SkipConn(nn.Module):
@@ -39,7 +16,7 @@ class SkipConn(nn.Module):
 	hidden_size (float): number of non-skip parameters per hidden layer
 	num_hidden_layers (float): number of hidden layers
 	"""
-	def __init__(self, hidden_size=100, num_hidden_layers=7, init_size=2, linmap=None, activation=nn.GELU):
+	def __init__(self, hidden_size=100, num_hidden_layers=7, init_size=2, linmap: CenteredLinearMap = None, activation: nn.Module = nn.GELU, use_cuda: bool = True):
 		super(SkipConn,self).__init__()
 		out_size = hidden_size
 
@@ -54,12 +31,18 @@ class SkipConn(nn.Module):
 		self.tanh = nn.Tanh()
 		self.sig = nn.Sigmoid()
 		self._linmap = linmap
+		self.use_cuda = use_cuda
+		if use_cuda:
+			self.cuda()
 
 	def forward(self, x):
 		if self._linmap:
 			x = self._linmap.map(x)
+		
 		cur = self.activation(self.inLayer(x))
-		prev = torch.tensor([]).cuda()
+		prev = torch.tensor([])
+		if self.use_cuda:
+			prev = prev.cuda()
 		for layer in self.hidden:
 			combined = torch.cat([cur, prev, x], 1)
 			prev = cur
@@ -70,8 +53,9 @@ class SkipConn(nn.Module):
 
 
 
+
 class Fourier(nn.Module):
-	def __init__(self, fourier_order=4, hidden_size=100, num_hidden_layers=7, linmap=None, activation=nn.GELU):
+	def __init__(self, fourier_order=4, hidden_size=100, num_hidden_layers=7, linmap: CenteredLinearMap=None, use_cuda: bool = True):
 		""" 
 		Linear torch model that adds Fourier Features to the initial input x as \
 		sin(x) + cos(x), sin(2x) + cos(2x), sin(3x) + cos(3x), ...
@@ -85,10 +69,12 @@ class Fourier(nn.Module):
 		"""
 		super(Fourier,self).__init__()
 		self.fourier_order = fourier_order
-		self.inner_model = SkipConn(hidden_size, num_hidden_layers, fourier_order*4 + 2, activation=activation)
-		# self.inner_model = Simple(hidden_size, num_hidden_layers, fourier_order*4 + 2, activation=activation)
+		self.inner_model = SkipConn(hidden_size, num_hidden_layers, fourier_order*4 + 2, activation=nn.LeakyReLU, use_cuda=use_cuda)
 		self._linmap = linmap
-		self.orders = torch.arange(1, fourier_order + 1).float().to('cuda')
+		orders = torch.arange(1, fourier_order + 1).float()
+		if use_cuda:
+			orders = orders.cuda()
+		self.orders = orders
 
 	def forward(self,x):
 		if self._linmap:
@@ -100,12 +86,15 @@ class Fourier(nn.Module):
 
 
 class Fourier2D(nn.Module):
-    def __init__(self, fourier_order=4, hidden_size=100, num_hidden_layers=7, linmap=None):
+    def __init__(self, fourier_order=4, hidden_size=100, num_hidden_layers=7, linmap: CenteredLinearMap=None,use_cuda: bool=True):
         super(Fourier2D,self).__init__()
         self.fourier_order = fourier_order
-        self.inner_model = SkipConn(hidden_size, num_hidden_layers, (fourier_order*fourier_order*4) + 2)
+        self.inner_model = SkipConn(hidden_size, num_hidden_layers, (fourier_order*fourier_order*4) + 2, activation=nn.LeakyReLU, use_cuda=use_cuda)
         self._linmap = linmap
-        self.orders = torch.arange(0, fourier_order).float().to('cuda')
+        orders = torch.arange(0, fourier_order).float()
+        if use_cuda:
+            orders = orders.cuda()
+        self.orders = orders
 
     def forward(self,x):
         if self._linmap:
@@ -120,9 +109,8 @@ class Fourier2D(nn.Module):
         fourier_features = torch.cat(features, 1)
         return self.inner_model(fourier_features)
 
-
 class CenteredLinearMap():
-	def __init__(self, xmin=-2.5, xmax=1.0, ymin=-1.1, ymax=1.1, x_size=None, y_size=None):
+	def __init__(self, xmin=-2.5, xmax=1.0, ymin=-1.1, ymax=1.1, x_size=None, y_size=None, use_cuda: bool = True):
 		if x_size is not None:
 			x_m = x_size/(xmax - xmin)
 		else: 
@@ -133,16 +121,18 @@ class CenteredLinearMap():
 			y_m = 1.
 		x_b = -(xmin + xmax)*x_m/2
 		y_b = -(ymin + ymax)*y_m/2
-		self.m = torch.tensor([x_m, y_m], dtype=torch.float)
-		self.b = torch.tensor([x_b, y_b], dtype=torch.float)
-
+		m = torch.tensor([x_m, y_m], dtype=torch.float)
+		b = torch.tensor([x_b, y_b], dtype=torch.float)
+		self.m = m
+		self.b = b
+		self.use_cuda = use_cuda
 
 	def map(self, x):
-		m = self.m.cuda()
-		b = self.b.cuda()
-		return m*x + b
-
-
+		if self.use_cuda:
+			self.m = self.m.cuda()
+			self.b = self.b.cuda()
+		return self.m*x + self.b
+	
 # Taylor features, x, x^2, x^3, ...
 # surprisingly terrible
 class Taylor(nn.Module):
